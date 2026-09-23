@@ -297,7 +297,7 @@ func (p *playerImpl) playImpl() {
 	if p.state != playerPaused && p.state != playerPausedAndStopReading {
 		return
 	}
-	if p.eof && p.buffered() == 0 {
+	if p.drained() {
 		return
 	}
 	p.state = playerPlay
@@ -480,6 +480,13 @@ func (p *playerImpl) buffered() int {
 	return len(p.buf) - p.readPos
 }
 
+// drained reports whether the source has ended and the buffer has no whole sample left.
+//
+// When drained is called, the mutex m must be locked.
+func (p *playerImpl) drained() bool {
+	return p.eof && p.buffered() < p.mux.format.ByteLength()
+}
+
 func (p *playerImpl) readBufferAndAdd(buf []float32) int {
 	p.m.Lock()
 	defer p.m.Unlock()
@@ -544,9 +551,11 @@ func (p *playerImpl) readBufferAndAdd(buf []float32) int {
 		p.readPos = 0
 	}
 
-	if p.eof && p.buffered() == 0 {
+	// A trailing partial sample can never be played and is dropped.
+	if p.drained() {
 		p.returnBufferToPool()
 		p.state = playerPaused
+		p.mux.removePlayer(p)
 	}
 
 	return n
@@ -626,11 +635,12 @@ func (p *playerImpl) finishSourceRead(buf *[]byte, gen, n int, err error) int {
 	p.buf = append(p.buf, (*buf)[:n]...)
 	if err == io.EOF {
 		p.eof = true
-		if p.buffered() == 0 {
+		if p.drained() {
 			p.returnBufferToPool()
 			if p.state == playerPlay {
 				p.state = playerPaused
 			}
+			p.mux.removePlayer(p)
 		}
 	}
 	return n

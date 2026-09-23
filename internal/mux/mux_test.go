@@ -892,3 +892,23 @@ type errorReader struct {
 func (r *errorReader) Read([]byte) (int, error) {
 	return 0, r.err
 }
+
+func TestPartialSampleAtEOFStopsPlayer(t *testing.T) {
+	m := mux.New(48000, 1, mux.FormatSignedInt16LE)
+	p := newPlayer(t, m, bytes.NewReader(make([]byte, 3)))
+	p.Play()
+	waitForBufferedSize(t, p, 3)
+
+	m.ReadFloat32s(make([]float32, 1))
+
+	deadline := time.Now().Add(time.Second)
+	for (p.IsPlaying() || p.IsRegistered()) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if got := p.IsPlaying(); got {
+		t.Errorf("IsPlaying after EOF: got %v; want false", got)
+	}
+	if got := p.IsRegistered(); got {
+		t.Errorf("IsRegistered after EOF: got %v; want false", got)
+	}
+}
