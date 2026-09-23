@@ -81,6 +81,7 @@ func (p *Player) BufferedSize() int {
 
 // Err returns an error that occurred while reading the source.
 // Reaching the end of the source (io.EOF) is not treated as an error.
+// An error is reported after the data read before it is played or discarded.
 //
 // Once Err returns a non-nil error, this player is closed and no longer usable,
 // and Err keeps returning the same error.

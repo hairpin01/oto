@@ -885,12 +885,103 @@ func TestSourceErrorUnregistersPlayer(t *testing.T) {
 	}
 }
 
-type errorReader struct {
-	err error
+func TestSourceErrorAfterDataPlaysData(t *testing.T) {
+	errSource := errors.New("source failed")
+	src := make([]byte, 256)
+	for i := range src {
+		src[i] = byte(i)
+	}
+
+	m := mux.New(48000, 1, mux.FormatUnsignedInt8)
+	p := newPlayer(t, m, &errorReader{
+		data: src,
+		err:  errSource,
+	})
+	p.Play()
+	waitForBufferedSize(t, p, len(src))
+
+	if got, want := p.BufferedSize(), len(src); got != want {
+		t.Errorf("BufferedSize: got %d; want %d", got, want)
+	}
+	if err := p.Err(); err != nil {
+		t.Errorf("Err before the data is played: got %v; want nil", err)
+	}
+
+	buf := make([]float32, len(src))
+	m.ReadFloat32s(buf)
+	for i, got := range buf {
+		if want := float32(i)/128 - 1; got != want {
+			t.Errorf("sample %d: got %v; want %v", i, got, want)
+		}
+	}
+	if got := p.BufferedSize(); got != 0 {
+		t.Errorf("BufferedSize after the data is played: got %d; want 0", got)
+	}
+	if err := p.Err(); !errors.Is(err, errSource) {
+		t.Errorf("Err after the data is played: got %v; want %v", err, errSource)
+	}
+	if p.IsPlaying() || p.IsRegistered() {
+		t.Error("a player with a source error stayed playing or registered")
+	}
 }
 
-func (r *errorReader) Read([]byte) (int, error) {
-	return 0, r.err
+func TestDiscardingBufferReportsSourceError(t *testing.T) {
+	errSource := errors.New("source failed")
+	for _, tt := range []struct {
+		name    string
+		discard func(p *mux.Player) error
+	}{
+		{
+			name: "seek",
+			discard: func(p *mux.Player) error {
+				_, err := p.Seek(0, io.SeekStart)
+				return err
+			},
+		},
+		{
+			name: "reset",
+			discard: func(p *mux.Player) error {
+				p.Reset()
+				return nil
+			},
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := mux.New(48000, 1, mux.FormatUnsignedInt8)
+			p := newPlayer(t, m, &errorReader{
+				data: make([]byte, 256),
+				err:  errSource,
+			})
+			p.Play()
+			waitForBufferedSize(t, p, 256)
+
+			if err := tt.discard(p); err != nil {
+				t.Fatal(err)
+			}
+			if err := p.Err(); !errors.Is(err, errSource) {
+				t.Errorf("Err: got %v; want %v", err, errSource)
+			}
+			if p.IsPlaying() || p.IsRegistered() {
+				t.Error("a player with a source error stayed playing or registered")
+			}
+		})
+	}
+}
+
+// errorReader is a source that returns data together with err, and then keeps returning err.
+type errorReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errorReader) Read(buf []byte) (int, error) {
+	n := copy(buf, r.data)
+	r.data = r.data[n:]
+	return n, r.err
+}
+
+func (r *errorReader) Seek(int64, int) (int64, error) {
+	return 0, nil
 }
 
 func TestPartialSampleAtEOFStopsPlayer(t *testing.T) {

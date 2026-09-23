@@ -191,13 +191,20 @@ type playerImpl struct {
 	src        io.Reader
 	prevVolume float64
 	volume     float64
-	err        error
 	state      playerState
 	buf        []byte
 	// readPos is the offset of the unconsumed data in buf.
 	readPos    int
 	eof        bool
 	bufferSize int
+
+	// err is the error reported by Err.
+	// Once err is set, the player is closed.
+	err error
+
+	// srcErr is an error from the source that is not reported by err yet.
+	// It is moved to err after the data read before it is played or discarded.
+	srcErr error
 
 	// reading reports whether a read from the source is in flight.
 	// readCond is signaled when reading becomes false.
@@ -375,6 +382,9 @@ func (p *playerImpl) Seek(offset int64, whence int) (int64, error) {
 		// Wait until an ongoing read from the source finishes.
 		// Otherwise the source would be sought while it is being read.
 		p.pauseAndStopReadingImpl()
+
+		// The buffered data is discarded, so a pending source error is reported now.
+		p.reportSourceErrorIfDrainedImpl()
 	}
 
 	// Check if the source implements io.Seeker.
@@ -400,6 +410,9 @@ func (p *playerImpl) Reset() {
 	p.buf = p.buf[:0]
 	p.readPos = 0
 	p.eof = false
+
+	// The buffered data is discarded, so a pending source error is reported now.
+	p.reportSourceErrorIfDrainedImpl()
 }
 
 func (p *Player) IsPlaying() bool {
@@ -472,6 +485,10 @@ func (p *playerImpl) closeImpl() error {
 	}
 	p.state = playerClosed
 	p.returnBufferToPool()
+
+	// A pending source error stays in srcErr, and Reset on this closed player would still move it to err.
+	// This is left as it is: oto's Player.Close is deprecated and does nothing, so through oto a player is
+	// closed only by setErrorImpl, which clears srcErr first, or by the cleanup once the player is unreachable.
 
 	return p.err
 }
@@ -557,6 +574,7 @@ func (p *playerImpl) readBufferAndAdd(buf []float32) int {
 		p.state = playerPaused
 		p.mux.removePlayer(p)
 	}
+	p.reportSourceErrorIfDrainedImpl()
 
 	return n
 }
@@ -568,7 +586,7 @@ func (p *playerImpl) canReadSourceToBuffer() bool {
 	if p.state == playerClosed || p.state == playerPausedAndStopReading {
 		return false
 	}
-	if p.eof {
+	if p.eof || p.srcErr != nil {
 		return false
 	}
 	return p.buffered() < p.bufferSize
@@ -589,7 +607,7 @@ func (p *playerImpl) prepareSourceRead() (*[]byte, int) {
 	p.m.Lock()
 	defer p.m.Unlock()
 
-	if p.err != nil || p.state == playerClosed || p.state == playerPausedAndStopReading {
+	if p.err != nil || p.srcErr != nil || p.state == playerClosed || p.state == playerPausedAndStopReading {
 		return nil, 0
 	}
 	if p.buffered() >= p.bufferSize {
@@ -613,11 +631,6 @@ func (p *playerImpl) finishSourceRead(buf *[]byte, gen, n int, err error) int {
 		return 0
 	}
 
-	if err != nil && err != io.EOF {
-		p.setErrorImpl(err)
-		return 0
-	}
-
 	if p.buf == nil {
 		p.buf = (*getBufferFromPool(p.bufferSize))[:0]
 		p.readPos = 0
@@ -633,7 +646,8 @@ func (p *playerImpl) finishSourceRead(buf *[]byte, gen, n int, err error) int {
 	}
 
 	p.buf = append(p.buf, (*buf)[:n]...)
-	if err == io.EOF {
+	switch {
+	case err == io.EOF:
 		p.eof = true
 		if p.drained() {
 			p.returnBufferToPool()
@@ -642,11 +656,34 @@ func (p *playerImpl) finishSourceRead(buf *[]byte, gen, n int, err error) int {
 			}
 			p.mux.removePlayer(p)
 		}
+	case err != nil:
+		// The data read before the error, including the data returned together with it, is played first.
+		p.srcErr = err
+		p.reportSourceErrorIfDrainedImpl()
 	}
 	return n
 }
 
+// reportSourceErrorIfDrainedImpl reports the pending source error if no whole sample is buffered.
+//
+// When reportSourceErrorIfDrainedImpl is called, the mutex m must be locked.
+func (p *playerImpl) reportSourceErrorIfDrainedImpl() {
+	if p.srcErr == nil {
+		return
+	}
+	// A trailing partial sample is never played.
+	if p.buffered() >= p.mux.format.ByteLength() {
+		return
+	}
+	err := p.srcErr
+	p.srcErr = nil
+	p.setErrorImpl(err)
+}
+
 func (p *playerImpl) setErrorImpl(err error) {
+	if p.err != nil {
+		panic("mux: the player's error is already set")
+	}
 	p.err = err
 	p.closeImpl()
 }
