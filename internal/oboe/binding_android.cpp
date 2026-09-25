@@ -110,10 +110,9 @@ oboe::AudioApi AudioApiForSdk() {
   // changes, which onErrorAfterClose recovers from. Before Android R the
   // disconnection was not always reported (google/oboe#893), leaving no way to
   // notice, so OpenSL ES, which follows the routing on its own, is used there.
-  if (oboe::getSdkVersion() < __ANDROID_API_R__) {
-    return oboe::AudioApi::OpenSLES;
-  }
-  return oboe::AudioApi::Unspecified;
+  //
+  // эээээ, принудительна openSLES для андроида
+  return oboe::AudioApi::OpenSLES;
 }
 
 class Stream : public oboe::AudioStreamDataCallback,
